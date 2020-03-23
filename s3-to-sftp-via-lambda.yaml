@@ -1,0 +1,585 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  This CloudFormation template will create infrastructure to enable S3 to SFTP transport, via an encrypted S3 bucket, lambda function and secrets manager (to hold SFTP details).
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: Deployment Details (Used for Naming and Tagging of Resources)
+        Parameters:
+          - SystemTag
+          - ApplicationTag
+          - EnvironmentTag
+          - SecurityTag
+          - OwnerTag
+      -
+        Label:
+          default: VPC / Networking Details
+        Parameters:
+          - VPCID
+          - SubnetOneId
+          - SubnetTwoId
+      -
+        Label: 
+          default: SFTP End Point Details
+        Parameters:
+          - SFTPEndPoint
+          - SFTPUserName
+          - SFTPPem
+          - SFTPKMSKey
+      -
+        Label: 
+          default: Details of S3 Bucket to be created for Storage of the CSVs
+        Parameters:
+          - S3BucketName
+          - S3KMSKey
+      -
+        Label: 
+          default: Simple Notification Service KMS Key
+        Parameters:
+          - SNSSubject
+          - SNSKMSKey
+      -
+        Label: 
+          default: S3 Infrastructure Bucket Details
+        Parameters:
+          - S3InfraBucket
+          - S3InfraLambdaPath
+      -
+        Label: 
+          default: Details of S3 Logs Storage Bucket
+        Parameters:
+          - S3LogsBucketName
+
+    ParameterLabels:
+      SystemTag:
+        default: System Tag Value
+      ApplicationTag:
+        default: Application Tag Value
+      EnvironmentTag:
+        default: Environment Tag Value
+      SecurityTag:
+        default: Security Tag Value
+      OwnerTag:
+        default: Owner Tag Value
+      VPCID:
+        default: VPC Id
+      SubnetOneId:
+        default: Subnet One Id
+      SubnetTwoId:
+        default: Subnet Two Id
+      SFTPEndPoint:
+        default: SFTP End Point (just domain / IP, no need for protocol)
+      SFTPUserName:
+        default: SFTP User Name
+      SFTPPem:
+        default: Base64 Encoded SFTP PEM
+      SFTPKMSKey:
+        default: KMS Key ARN to be used for SFTP Details Encryption
+      S3BucketName:
+        default: S3 Bucket Name to be Created (remember - it must be unique!)
+      S3KMSKey:
+        default: KMS Key ARN to be used for Bucket Encryption
+      SNSSubject:
+        default: Subject for the SNS notifications       
+      SNSKMSKey:
+        default: KMS Key ARN to be used for the SNS topics
+      S3InfraBucket:
+        default: S3 Infrastructure Bucket
+      S3InfraLambdaPath:
+        default: S3 Infrastructure Lambda ZIP File Path
+      S3LogsBucketName:
+        default: Logs Bucket Name
+
+Parameters:
+  SystemTag:
+    Type: String
+    MinLength: 2
+    MaxLength: 10
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: Must begin with a letter and contain only letters and numbers (2 to 10)
+    
+  ApplicationTag:
+    Type: String
+    MinLength: 2
+    MaxLength: 25
+    ConstraintDescription: Must be between 2 to 25 characters
+
+  EnvironmentTag:
+    Type: String
+    AllowedValues:
+      - dev
+      - test
+      - uat
+      - prelive
+      - live
+    
+  SecurityTag:
+    Type: String
+    MinLength: 2
+    MaxLength: 25
+    ConstraintDescription: Must be between 2 to 25 characters
+
+  OwnerTag:
+    Type: String
+    MinLength: 2
+    MaxLength: 25
+    ConstraintDescription: Must be between 2 to 25 characters
+
+  VPCID:
+    Type: String
+    MinLength: 12
+    MaxLength: 20
+    AllowedPattern: 'vpc-[a-f0-9]*'
+    ConstraintDescription: Must be a VPC ID starting vpc-
+
+  SubnetOneId:
+    Type: String
+    MinLength: 15
+    MaxLength: 23
+    AllowedPattern: 'subnet-[a-f0-9]*'
+    ConstraintDescription: Must be a Subnet ID starting subnet-
+
+  SubnetTwoId:
+    Type: String
+    MinLength: 15
+    MaxLength: 23
+    AllowedPattern: 'subnet-[a-f0-9]*'
+    ConstraintDescription: Must be a Subnet ID starting subnet-
+
+  SFTPEndPoint:
+    Type: String
+    MinLength: 10
+    MaxLength: 150
+    ConstraintDescription: Must be between 12 and 150 characters
+
+  SFTPUserName:
+    Type: String
+    MinLength: 2
+    MaxLength: 30
+    ConstraintDescription: Must be between 2 and 30 characters
+
+  SFTPPem:
+    Type: String
+    MinLength: 1024
+    MaxLength: 4096
+    NoEcho: true
+    ConstraintDescription: Must be between 1024 and 4096 characters
+
+  SFTPKMSKey:
+    Type: String
+    AllowedPattern: 'arn:aws:kms:[a-z]*-[a-z]*-[0-9]:[0-9]*:key\/[a-f0-9-]*'
+    MinLength: 50
+    MaxLength: 100
+    ConstraintDescription: Must be a valid KMS ARN string
+
+  S3BucketName:
+    Type: String
+    AllowedPattern: '[a-z][a-z0-9-\.]*'
+    MinLength: 3
+    MaxLength: 63
+    ConstraintDescription: Must be a string between 3 and 63 characters in lower case with hypens and periods allowed
+
+  S3KMSKey:
+    Type: String
+    AllowedPattern: 'arn:aws:kms:[a-z]*-[a-z]*-[0-9]:[0-9]*:key\/[a-f0-9-]*'
+    MinLength: 50
+    MaxLength: 100
+    ConstraintDescription: Must be a valid KMS ARN string
+
+  SNSSubject:
+    Type: String
+    MinLength: 5
+    MaxLength: 30
+    ConstraintDescription: Must be a string between 5 and 30   
+
+  SNSKMSKey:
+    Type: String
+    AllowedPattern: 'arn:aws:kms:[a-z]*-[a-z]*-[0-9]:[0-9]*:key\/[a-f0-9-]*'
+    MinLength: 50
+    MaxLength: 100
+    ConstraintDescription: Must be a valid KMS ARN string
+
+  S3InfraBucket:
+    Type: String
+    AllowedPattern: '[a-z][a-z0-9-\.]*'
+    MinLength: 3
+    MaxLength: 63
+    ConstraintDescription: Must be a string between 3 and 63 characters in lower case with hypens and periods allowed  
+
+  S3InfraLambdaPath:
+    Type: String
+    MinLength: 5
+    MaxLength: 100
+    ConstraintDescription: Must be a string between 5 and 100     
+
+  S3LogsBucketName:
+    Type: String
+    AllowedPattern: '[a-z][a-z0-9-\.]*'
+    MinLength: 3
+    MaxLength: 63
+    ConstraintDescription: Must be a string between 3 and 63 characters in lower case with hyphens and periods allowed
+
+Resources:
+
+#---------------------------------------------------------------------
+# S3 BUCKET
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref S3BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: aws:kms
+            KMSMasterKeyID: !Ref S3KMSKey
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3LogsBucketName
+        LogFilePrefix: !Sub ${S3BucketName}/
+      NotificationConfiguration:
+        LambdaConfigurations:
+          -
+            Event: s3:ObjectCreated:Put
+            Function: !GetAtt S3ToSFTPLambdaFunction.Arn
+      Tags:
+        - Key: Name
+          Value: !Ref S3BucketName
+        - Key: Application
+          Value: !Ref ApplicationTag
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: SystemTag
+          Value: !Ref SystemTag
+        - Key: Security
+          Value: !Ref SecurityTag
+        - Key: Owner
+          Value: !Ref OwnerTag
+
+  S3BucketPolicy:
+    DependsOn: S3Bucket
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    Properties: 
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          # Force users to use HTTPS to download items
+          - 
+            Action: 
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Effect: Deny
+            Resource: !Sub arn:aws:s3:::${S3BucketName}/*
+            Principal: '*'
+            Condition: 
+              Bool: 
+                aws:SecureTransport: 
+                  - false
+
+# END S3 BUCKET
+#---------------------------------------------------------------------
+
+
+
+#---------------------------------------------------------------------
+# RESTRICTIVE POLICIES
+
+  S3RestrictedUploadPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Policy to be used for any entity that wishes to be able to upload to the S3 bucket
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+          Resource:
+            - !Sub arn:aws:s3:::${S3BucketName}/uploads/*
+        - Effect: Allow
+          Action:
+            - kms:Encrypt
+            - kms:GenerateDataKey
+          Resource: 
+            - !Ref S3KMSKey
+          Condition:
+            StringEquals:
+              kms:ViaService: !Sub s3.${AWS::Region}.amazonaws.com
+
+  S3LambdaToSFTPPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Policy to be used for the Lambda function which uploads content to SFTP
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource:
+            - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+        - Effect: Allow
+          Action:
+            - ec2:DescribeNetworkInterfaces
+            - ec2:CreateNetworkInterface
+            - ec2:DeleteNetworkInterface
+          Resource:
+            - '*'
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:DeleteObject
+            - s3:CopyObject
+          Resource:
+            - !Sub arn:aws:s3:::${S3BucketName}/uploads/*
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+          Resource:
+            - !Sub arn:aws:s3:::${S3BucketName}/success/*/*/*/*/*
+            - !Sub arn:aws:s3:::${S3BucketName}/failure/*/*/*/*/*
+        - Effect: Allow
+          Action:
+            - kms:Decrypt
+            - kms:Encrypt
+            - kms:GenerateDataKey
+          Resource: 
+            - !Ref S3KMSKey
+          Condition:
+            StringEquals:
+              kms:ViaService: !Sub s3.${AWS::Region}.amazonaws.com
+        - Effect: Allow
+          Action:
+            - secretsmanager:GetSecretValue
+          Resource: 
+            - !Ref S3toSFTPSecManUser
+        - Effect: Allow
+          Action:
+            - kms:Decrypt
+          Resource: 
+            - !Ref SFTPKMSKey
+          Condition:
+            StringEquals:
+              kms:ViaService: !Sub secretsmanager.${AWS::Region}.amazonaws.com
+        - Effect: Allow
+          Action:
+            - SNS:Publish
+          Resource: 
+            - !Ref S3toSFTPSuccessSNSTopic
+            - !Ref S3toSFTPErrorSNSTopic
+        - Effect: Allow
+          Action:
+            - kms:Decrypt
+            - kms:GenerateDataKey
+          Resource: 
+            - !Ref S3KMSKey
+          Condition:
+            StringEquals:
+              kms:ViaService: !Sub sns.${AWS::Region}.amazonaws.com
+
+# END RESTRICTIVE POLICIES
+#---------------------------------------------------------------------
+
+
+
+#---------------------------------------------------------------------
+# S3 TO SFTP LAMBDA FUNCTION, INVOKE POLICY, ROLE AND SG
+
+  S3ToSFTPLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt S3ToSFTPLambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Sub ${AWS::AccountId}
+      SourceArn: !Sub arn:aws:s3:::${S3BucketName}
+
+  S3ToSFTPLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - !Sub ${S3LambdaToSFTPPolicy}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Tags:
+        - Key: Name
+          Value: S3ToSFTPLambdaExecutionRole
+        - Key: Application
+          Value: !Ref ApplicationTag
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: SystemTag
+          Value: !Ref SystemTag
+        - Key: Security
+          Value: !Ref SecurityTag
+        - Key: Owner
+          Value: !Ref OwnerTag
+
+  S3ToSFTPLambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: Allow
+      VpcId: !Ref VPCID
+      SecurityGroupIngress:
+      - IpProtocol: -1
+        FromPort: -1
+        ToPort: -1
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        FromPort: -1
+        ToPort: -1
+        CidrIp: 0.0.0.0/0
+
+  S3ToSFTPLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.upload
+      Runtime: python3.7
+      Timeout: 60
+      Role: !GetAtt S3ToSFTPLambdaExecutionRole.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref S3ToSFTPLambdaSecurityGroup
+        SubnetIds:
+          - !Ref SubnetOneId
+          - !Ref SubnetTwoId
+      Environment:
+        Variables:
+          SFTP_SECMAN_KEY: !Sub /secm/${ApplicationTag}/sftpuser
+          SUCCESS_SNS_TOPIC: !Ref S3toSFTPSuccessSNSTopic
+          ERROR_SNS_TOPIC: !Ref S3toSFTPErrorSNSTopic
+          SNS_SUBJECT: !Ref SNSSubject
+      Code:
+        S3Bucket: !Ref S3InfraBucket
+        S3Key: !Ref S3InfraLambdaPath
+      Tags:
+        - Key: Name
+          Value: S3ToSFTPLambdaFunction
+        - Key: Application
+          Value: !Ref ApplicationTag
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: SystemTag
+          Value: !Ref SystemTag
+        - Key: Security
+          Value: !Ref SecurityTag
+        - Key: Owner
+          Value: !Ref OwnerTag
+
+# END S3 TO SFTP LAMBDA FUNCTION, INVOKE POLICY, ROLE AND SG
+#---------------------------------------------------------------------
+
+
+#---------------------------------------------------------------------
+# SECRETS MANAGER SFTP DETAILS STORAGE
+  
+  S3toSFTPSecManUser:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub /secm/${ApplicationTag}/sftpuser
+      KmsKeyId: !Ref SFTPKMSKey
+      SecretString: !Sub '{"endpoint":"${SFTPEndPoint}","username":"${SFTPUserName}","pem":"${SFTPPem}"}'
+      Tags:
+        - Key: Name
+          Value: S3ToSFTPLambdaFunction
+        - Key: Application
+          Value: !Ref ApplicationTag
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: SystemTag
+          Value: !Ref SystemTag
+        - Key: Security
+          Value: !Ref SecurityTag
+        - Key: Owner
+          Value: !Ref OwnerTag
+
+# END SECRETS MANAGER SFTP DETAILS STORAGE
+#---------------------------------------------------------------------
+
+
+#---------------------------------------------------------------------
+# SNS TOPICS
+
+  S3toSFTPSuccessSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: S3toSFTPSuccessSNSTopic
+      KmsMasterKeyId: !Ref SNSKMSKey
+      Tags:
+        - Key: Name
+          Value: S3toSFTPSuccessSNSTopic
+        - Key: Application
+          Value: !Ref ApplicationTag
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: SystemTag
+          Value: !Ref SystemTag
+        - Key: Security
+          Value: !Ref SecurityTag
+        - Key: Owner
+          Value: !Ref OwnerTag
+
+  S3toSFTPErrorSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: S3toSFTPErrorSNSTopic
+      KmsMasterKeyId: !Ref SNSKMSKey
+      Tags:
+        - Key: Name
+          Value: S3toSFTPErrorSNSTopic
+        - Key: Application
+          Value: !Ref ApplicationTag
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: SystemTag
+          Value: !Ref SystemTag
+        - Key: Security
+          Value: !Ref SecurityTag
+        - Key: Owner
+          Value: !Ref OwnerTag
+
+# END SNS TOPICS          
+#---------------------------------------------------------------------
+
+
+#---------------------------------------------------------------------
+# OUTPUTS
+
+Outputs:
+  S3Endpoint:
+    Description: Endpoint where the system should drop files to be transferred to the SFTP server
+    Value: !Sub s3://${S3Bucket}/uploads/
+
+  SuccessSNSTopic:
+    Description: Subscribe people / systems to this topic if they require to be alerted to SUCCESSFUL transfers to the outbound SFTP server
+    Value: !GetAtt S3toSFTPSuccessSNSTopic.TopicName
+
+  ErrorSNSTopic:
+    Description: Subscribe people / systems to this topic if they require to be alerted to FAILED transfers to the outbound SFTP server
+    Value: !GetAtt S3toSFTPErrorSNSTopic.TopicName 
+
+# END OUTPUTS
+#---------------------------------------------------------------------
+
